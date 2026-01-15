@@ -4,9 +4,8 @@
 import argparse
 import re
 import time
-from collections import deque
 from pathlib import Path
-from typing import Deque, Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 import pandas as pd
 from bs4 import BeautifulSoup
@@ -286,36 +285,53 @@ def pair_day_and_room(day_lines: List[str], room_lines: List[str]) -> List[Tuple
     """
     day_lines と room_lines を 01/02 等で対応付け（無ければ順序で対応）。
     戻り: [(day_period_str, room_str), ...]
+    
+    When multiple rooms share the same key (e.g., "01:53-401", "01:53-403", "01:63-3F-C"),
+    ALL rooms with that key are paired with the corresponding day entry.
+    
+    When there are more rooms than days (e.g., one "Thur.2-3" with multiple rooms),
+    ALL rooms are paired with each day entry (Cartesian product of remaining items).
     """
     day_entries = keyed_lines(day_lines)
     room_entries = keyed_lines(room_lines)
 
-    room_by_key: Dict[str, Deque[int]] = {}
-    for idx, (room_key, _) in enumerate(room_entries):
-        if not room_key:
-            continue
-        room_by_key.setdefault(room_key, deque()).append(idx)
+    # Group ALL rooms by their key (not a queue - we want all of them)
+    room_by_key: Dict[str, List[Tuple[int, str]]] = {}
+    for idx, (room_key, room_value) in enumerate(room_entries):
+        if room_key:
+            room_by_key.setdefault(room_key, []).append((idx, room_value))
 
     used_day = set()
     used_room = set()
     pairs: List[Tuple[str, str]] = []
 
+    # Match keyed entries: one day pairs with ALL rooms sharing the same key
     for day_idx, (day_key, day_value) in enumerate(day_entries):
         if not day_key:
             continue
-        queue = room_by_key.get(day_key)
-        if not queue:
+        room_list = room_by_key.get(day_key)
+        if not room_list:
             continue
-        room_idx = queue.popleft()
         used_day.add(day_idx)
-        used_room.add(room_idx)
-        pairs.append((day_value, room_entries[room_idx][1]))
+        for room_idx, room_value in room_list:
+            used_room.add(room_idx)
+            pairs.append((day_value, room_value))
 
     day_seq = [day_entries[i][1] for i in range(len(day_entries)) if i not in used_day]
     room_seq = [room_entries[i][1] for i in range(len(room_entries)) if i not in used_room]
 
-    for dp, rm in zip(day_seq, room_seq):
-        pairs.append((dp, rm))
+    # When counts match, pair by position (original behavior).
+    # When counts don't match, create Cartesian product so ALL rooms get paired
+    # with ALL day entries. This handles cases like "Thur.2-3" with multiple rooms
+    # where the class uses multiple rooms.
+    if len(day_seq) == len(room_seq):
+        for dp, rm in zip(day_seq, room_seq):
+            pairs.append((dp, rm))
+    else:
+        # Cartesian product: each day entry pairs with every room entry
+        for dp in day_seq:
+            for rm in room_seq:
+                pairs.append((dp, rm))
 
     return pairs
 
@@ -611,6 +627,16 @@ def open_fall_winter_listing(page: Page) -> Page:
         # If the UI changed or the link isn't available, continue with default page size.
         pass
 
+    # Wait for page to fully stabilize before returning
+    try:
+        page.wait_for_load_state("networkidle", timeout=10000)
+    except Exception:
+        pass
+    try:
+        page.wait_for_selector(RESULT_TABLE_SELECTOR, timeout=10000)
+    except Exception:
+        pass
+
     return page
 
 
@@ -877,6 +903,17 @@ def harvest_result_pages(
 
     while True:
         page_no += 1
+
+        # Wait for page to be stable before reading content
+        try:
+            page.wait_for_load_state("domcontentloaded", timeout=10000)
+        except Exception:
+            pass
+        try:
+            page.wait_for_selector(RESULT_TABLE_SELECTOR, timeout=10000)
+        except Exception:
+            pass
+
         html = page.content()
         soup = BeautifulSoup(html, "lxml")
 
